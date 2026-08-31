@@ -11,7 +11,6 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Banco de dados em memória
 const db = {
   users: new Map(),
   sessions: new Map(),
@@ -19,7 +18,6 @@ const db = {
   onlineUsers: new Map()
 };
 
-// Middleware de autenticação
 function authenticate(req, res, next) {
   const sessionId = req.headers['x-session-id'];
   if (!sessionId || !db.sessions.has(sessionId)) {
@@ -29,7 +27,6 @@ function authenticate(req, res, next) {
   next();
 }
 
-// ===== AUTENTICAÇÃO =====
 app.post('/api/register', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -54,7 +51,7 @@ app.post('/api/register', async (req, res) => {
       losses: 0,
       musicDownloads: 0,
       videoDownloads: 0,
-      avatar: `https://api.dicebear.com/7.x/bottts-neutral/svg?seed=${encodeURIComponent(username)}&backgroundColor=b6e3f4,c0aede,d1d4f9`,
+      avatar: `https://api.dicebear.com/7.x/bottts-neutral/svg?seed=${encodeURIComponent(username)}`,
       createdAt: Date.now()
     };
     db.users.set(userId, user);
@@ -64,7 +61,6 @@ app.post('/api/register', async (req, res) => {
 
     res.json({ sessionId, user: sanitizeUser(user) });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Erro ao registrar' });
   }
 });
@@ -89,7 +85,6 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// ===== USUÁRIO =====
 app.get('/api/me', authenticate, (req, res) => {
   res.json({ user: sanitizeUser(req.user) });
 });
@@ -112,7 +107,6 @@ app.get('/api/users/search', authenticate, (req, res) => {
   res.json({ users });
 });
 
-// ===== AMIGOS =====
 app.post('/api/friends/add', authenticate, (req, res) => {
   const { userId } = req.body;
   const friend = db.users.get(userId);
@@ -120,11 +114,7 @@ app.post('/api/friends/add', authenticate, (req, res) => {
   if (userId === req.user.id) return res.status(400).json({ error: 'Não pode adicionar a si mesmo' });
   if (req.user.friends.includes(userId)) return res.status(400).json({ error: 'Já é seu amigo' });
   req.user.friends.push(userId);
-  const friends = req.user.friends.map(id => {
-    const u = db.users.get(id);
-    return u ? { id: u.id, username: u.username, avatar: u.avatar, coins: u.coins } : null;
-  }).filter(Boolean);
-  res.json({ success: true, friends });
+  res.json({ success: true });
 });
 
 app.post('/api/friends/remove', authenticate, (req, res) => {
@@ -143,33 +133,41 @@ app.get('/api/friends', authenticate, (req, res) => {
   res.json({ friends });
 });
 
-// ===== DOWNLOADS COM PROXY CORS =====
+// DOWNLOAD DE MÚSICA COM PROXYCORS.IO
 app.post('/api/download/music', authenticate, async (req, res) => {
   try {
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: 'Nome obrigatório' });
     
-    // Usar proxy CORS
     const apiUrl = `https://kuromi-system-tech.onrender.com/api/play-audio?name=${encodeURIComponent(name)}`;
-    const proxiedUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(apiUrl)}`;
+    const proxyUrl = `https://proxycors.io/?url=${encodeURIComponent(apiUrl)}`;
     
-    console.log('Fetching music:', proxiedUrl);
-    const response = await fetch(proxiedUrl, { timeout: 15000 });
+    console.log('Buscando música via proxycors.io:', proxyUrl);
+    
+    const response = await fetch(proxyUrl, { 
+      timeout: 30000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0'
+      }
+    });
     
     if (!response.ok) {
-      console.error('Music API error:', response.status);
-      return res.status(500).json({ error: 'API de música indisponível' });
+      console.error('Erro na API:', response.status, response.statusText);
+      return res.status(500).json({ error: `API retornou erro ${response.status}` });
     }
     
     const contentType = response.headers.get('content-type');
-    console.log('Music response type:', contentType);
+    console.log('Content-Type:', contentType);
     
-    let data;
+    // Se for JSON
     if (contentType && contentType.includes('application/json')) {
-      data = await response.json();
-      // Se a API retornar JSON com URL de áudio
-      if (data.url || data.audio_url || data.download_url) {
-        const audioUrl = data.url || data.audio_url || data.download_url;
+      const data = await response.json();
+      console.log('Resposta JSON:', JSON.stringify(data).substring(0, 300));
+      
+      // Extrair URL de áudio
+      let audioUrl = data.url || data.audio_url || data.download_url || data.link || data.audio;
+      
+      if (audioUrl) {
         const reward = 15;
         req.user.coins += reward;
         req.user.musicDownloads += 1;
@@ -181,9 +179,11 @@ app.post('/api/download/music', authenticate, async (req, res) => {
           newBalance: req.user.coins 
         });
       }
+      
+      return res.status(500).json({ error: 'URL de áudio não encontrada na resposta' });
     }
     
-    // Se for áudio direto, retornar como base64 ou URL
+    // Se for áudio direto
     const buffer = await response.buffer();
     const base64 = buffer.toString('base64');
     const mimeType = contentType || 'audio/mpeg';
@@ -201,44 +201,53 @@ app.post('/api/download/music', authenticate, async (req, res) => {
       newBalance: req.user.coins 
     });
   } catch (err) {
-    console.error('Music download error:', err);
-    res.status(500).json({ error: 'Erro ao baixar música: ' + err.message });
+    console.error('Erro completo:', err);
+    res.status(500).json({ error: `Erro: ${err.message}` });
   }
 });
 
+// DOWNLOAD DE VÍDEO COM PROXYCORS.IO
 app.post('/api/download/video', authenticate, async (req, res) => {
   try {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'URL obrigatória' });
     
-    // Usar proxy CORS
     const apiUrl = `https://kuromi-system-tech.onrender.com/api/insta?url=${encodeURIComponent(url)}`;
-    const proxiedUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(apiUrl)}`;
+    const proxyUrl = `https://proxycors.io/?url=${encodeURIComponent(apiUrl)}`;
     
-    console.log('Fetching video:', proxiedUrl);
-    const response = await fetch(proxiedUrl, { timeout: 20000 });
+    console.log('Buscando vídeo via proxycors.io:', proxyUrl);
+    
+    const response = await fetch(proxyUrl, { 
+      timeout: 30000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0'
+      }
+    });
     
     if (!response.ok) {
-      console.error('Video API error:', response.status);
-      return res.status(500).json({ error: 'API de vídeo indisponível' });
+      return res.status(500).json({ error: `API retornou erro ${response.status}` });
     }
     
     const contentType = response.headers.get('content-type');
-    console.log('Video response type:', contentType);
+    console.log('Content-Type vídeo:', contentType);
     
-    let data;
     if (contentType && contentType.includes('application/json')) {
-      data = await response.json();
-      console.log('Video API response:', JSON.stringify(data).substring(0, 200));
+      const data = await response.json();
+      console.log('Resposta vídeo:', JSON.stringify(data).substring(0, 300));
       
-      // Extrair URL de vídeo de várias estruturas possíveis
       let videoUrl = null;
+      
+      // Tentar várias estruturas possíveis
       if (data.video_url) videoUrl = data.video_url;
       else if (data.url) videoUrl = data.url;
       else if (data.download_url) videoUrl = data.download_url;
-      else if (data.result && data.result.video_url) videoUrl = data.result.video_url;
-      else if (data.data && data.data.video_url) videoUrl = data.data.video_url;
+      else if (data.link) videoUrl = data.link;
+      else if (data.video) videoUrl = data.video;
+      else if (data.result?.video_url) videoUrl = data.result.video_url;
+      else if (data.data?.video_url) videoUrl = data.data.video_url;
       else if (Array.isArray(data) && data[0]?.video_url) videoUrl = data[0].video_url;
+      else if (data.hd) videoUrl = data.hd;
+      else if (data.sd) videoUrl = data.sd;
       
       if (videoUrl) {
         const reward = 25;
@@ -253,7 +262,7 @@ app.post('/api/download/video', authenticate, async (req, res) => {
         });
       }
       
-      return res.status(500).json({ error: 'URL de vídeo não encontrada na resposta da API' });
+      return res.status(500).json({ error: 'URL de vídeo não encontrada' });
     }
     
     // Se for vídeo direto
@@ -274,27 +283,8 @@ app.post('/api/download/video', authenticate, async (req, res) => {
       newBalance: req.user.coins 
     });
   } catch (err) {
-    console.error('Video download error:', err);
-    res.status(500).json({ error: 'Erro ao baixar vídeo: ' + err.message });
-  }
-});
-
-// Proxy genérico para contornar CORS
-app.get('/api/proxy', async (req, res) => {
-  try {
-    const { url } = req.query;
-    if (!url) return res.status(400).json({ error: 'URL obrigatória' });
-    
-    const proxiedUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-    const response = await fetch(proxiedUrl, { timeout: 20000 });
-    
-    const contentType = response.headers.get('content-type');
-    res.set('Content-Type', contentType || 'application/octet-stream');
-    
-    response.body.pipe(res);
-  } catch (err) {
-    console.error('Proxy error:', err);
-    res.status(500).json({ error: 'Erro no proxy' });
+    console.error('Erro vídeo:', err);
+    res.status(500).json({ error: `Erro: ${err.message}` });
   }
 });
 
@@ -306,7 +296,6 @@ function sanitizeUser(u) {
   };
 }
 
-// ===== WEBSOCKET =====
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
@@ -324,36 +313,8 @@ wss.on('connection', (ws, req) => {
           currentUser = db.users.get(session.userId);
           db.onlineUsers.set(currentUser.id, ws);
           ws.send(JSON.stringify({ type: 'authed', user: sanitizeUser(currentUser) }));
-          broadcastOnline();
           break;
         }
-
-        case 'create-room': {
-          if (!currentUser) return;
-          const roomId = uuidv4();
-          const room = {
-            id: roomId, game: msg.game, host: currentUser.id,
-            players: [{ id: currentUser.id, username: currentUser.username, avatar: currentUser.avatar, ws, ready: true }],
-            state: null, status: 'waiting', maxPlayers: 2
-          };
-          db.rooms.set(roomId, room);
-          currentRoom = room;
-          ws.send(JSON.stringify({ type: 'room-created', room: serializeRoom(room) }));
-          break;
-        }
-
-        case 'join-room': {
-          if (!currentUser) return;
-          const room = db.rooms.get(msg.roomId);
-          if (!room) return ws.send(JSON.stringify({ type: 'error', message: 'Sala não encontrada' }));
-          if (room.players.length >= room.maxPlayers) return ws.send(JSON.stringify({ type: 'error', message: 'Sala cheia' }));
-          room.players.push({ id: currentUser.id, username: currentUser.username, avatar: currentUser.avatar, ws, ready: true });
-          currentRoom = room;
-          broadcastRoom(room, { type: 'player-joined', room: serializeRoom(room) });
-          if (room.players.length === 2) startGame(room);
-          break;
-        }
-
         case 'play-bot': {
           if (!currentUser) return;
           const roomId = uuidv4();
@@ -371,7 +332,6 @@ wss.on('connection', (ws, req) => {
           setTimeout(() => startGame(room), 600);
           break;
         }
-
         case 'invite-friend': {
           if (!currentUser) return;
           const friend = db.users.get(msg.friendId);
@@ -388,17 +348,26 @@ wss.on('connection', (ws, req) => {
           currentRoom = room;
           ws.send(JSON.stringify({ type: 'room-created', room: serializeRoom(room) }));
           friendWs.send(JSON.stringify({
-            type: 'invite', from: currentUser.username, roomId, game: msg.game, avatar: currentUser.avatar
+            type: 'invite', from: currentUser.username, roomId, game: msg.game
           }));
           break;
         }
-
+        case 'join-room': {
+          if (!currentUser) return;
+          const room = db.rooms.get(msg.roomId);
+          if (!room) return ws.send(JSON.stringify({ type: 'error', message: 'Sala não encontrada' }));
+          if (room.players.length >= room.maxPlayers) return ws.send(JSON.stringify({ type: 'error', message: 'Sala cheia' }));
+          room.players.push({ id: currentUser.id, username: currentUser.username, avatar: currentUser.avatar, ws, ready: true });
+          currentRoom = room;
+          broadcastRoom(room, { type: 'player-joined', room: serializeRoom(room) });
+          if (room.players.length === 2) startGame(room);
+          break;
+        }
         case 'game-action': {
           if (!currentRoom) return;
           handleGameAction(currentRoom, ws, currentUser, msg.action, msg.data);
           break;
         }
-
         case 'leave-room': {
           if (!currentRoom) return;
           leaveRoom(currentRoom, currentUser);
@@ -416,16 +385,9 @@ wss.on('connection', (ws, req) => {
     if (currentUser) {
       db.onlineUsers.delete(currentUser.id);
       if (currentRoom) leaveRoom(currentRoom, currentUser);
-      broadcastOnline();
     }
   });
 });
-
-function broadcastOnline() {
-  for (const ws of db.onlineUsers.values()) {
-    ws.send(JSON.stringify({ type: 'online-count', count: db.onlineUsers.size }));
-  }
-}
 
 function broadcastRoom(room, msg) {
   for (const p of room.players) {
@@ -445,14 +407,9 @@ function serializeRoom(room) {
 
 function leaveRoom(room, user) {
   room.players = room.players.filter(p => p.id !== user.id);
-  if (room.players.length === 0) {
-    db.rooms.delete(room.id);
-  } else {
-    broadcastRoom(room, { type: 'player-left', userId: user.id, room: serializeRoom(room) });
-  }
+  if (room.players.length === 0) db.rooms.delete(room.id);
 }
 
-// ===== JOGOS (mesma lógica do anterior) =====
 function startGame(room) {
   room.status = 'playing';
   if (room.game === 'blackjack') room.state = initBlackjack();
@@ -483,9 +440,9 @@ function calcHand(hand) {
   return s;
 }
 
-function initSlots() { return { game: 'slots', reels: null, result: null, win: 0 }; }
-function initRoulette() { return { game: 'roulette', number: null, color: null, bets: {}, phase: 'betting' }; }
-function initDice() { return { game: 'dice', scores: {}, round: 1, maxRounds: 5, currentTurn: null, lastRoll: null }; }
+function initSlots() { return { game: 'slots', reels: null, win: 0 }; }
+function initRoulette() { return { game: 'roulette', number: null, color: null, bets: {} }; }
+function initDice() { return { game: 'dice', scores: {}, round: 1, maxRounds: 5, lastRoll: null }; }
 
 function handleGameAction(room, ws, user, action, data) {
   if (room.game === 'blackjack') handleBlackjack(room, ws, user, action);
@@ -517,8 +474,10 @@ function handleBlackjack(room, ws, user, action) {
 function finishBlackjack(room, user, result) {
   room.state.phase = 'finished';
   room.state.result = { userId: user.id, result };
-  let reward = result === 'win' ? 100 : result === 'lose' || result === 'bust' ? -50 : 0;
-  applyReward(user, reward, result === 'win');
+  let reward = result === 'win' ? 100 : (result === 'lose' || result === 'bust') ? -50 : 0;
+  user.coins = Math.max(0, user.coins + reward);
+  if (result === 'win') user.wins++;
+  else if (reward < 0) user.losses++;
   broadcastRoom(room, { type: 'game-finished', state: room.state, reward, newBalance: user.coins });
   setTimeout(() => db.rooms.delete(room.id), 8000);
 }
@@ -527,7 +486,6 @@ function handleSlots(room, ws, user, action) {
   if (action !== 'spin') return;
   const symbols = ['🍒', '🍋', '🍊', '🍇', '⭐', '💎', '7️⃣'];
   const reels = Array(3).fill(null).map(() => symbols[Math.floor(Math.random() * symbols.length)]);
-  room.state.reels = reels;
   let win = 0;
   if (reels[0] === reels[1] && reels[1] === reels[2]) {
     if (reels[0] === '💎') win = 1000;
@@ -535,9 +493,8 @@ function handleSlots(room, ws, user, action) {
     else if (reels[0] === '⭐') win = 250;
     else win = 150;
   } else if (reels[0] === reels[1] || reels[1] === reels[2]) win = 30;
-  room.state.result = reels;
-  room.state.win = win;
-  applyReward(user, win, win > 0);
+  user.coins += win;
+  if (win > 0) user.wins++;
   broadcastRoom(room, { type: 'slots-result', reels, win, newBalance: user.coins });
 }
 
@@ -560,7 +517,8 @@ function handleRoulette(room, ws, user, action, data) {
         if ((b.value === 'even' && isEven) || (b.value === 'odd' && !isEven)) totalWin += 50;
       } else if (b.type === 'number' && b.value === number) totalWin += 500;
     }
-    applyReward(user, totalWin, totalWin > 0);
+    user.coins += totalWin;
+    if (totalWin > 0) user.wins++;
     broadcastRoom(room, { type: 'roulette-result', number, color, win: totalWin, newBalance: user.coins });
   }
 }
@@ -595,22 +553,15 @@ function finishDice(room) {
   let result, reward = 0;
   if (userScore > botScore) { result = 'win'; reward = 200; }
   else if (userScore < botScore) { result = 'lose'; reward = -80; }
-  else { result = 'push'; reward = 0; }
-  applyReward(user, reward, result === 'win');
+  user.coins = Math.max(0, user.coins + reward);
+  if (result === 'win') user.wins++;
+  else if (reward < 0) user.losses++;
   broadcastRoom(room, { type: 'dice-finished', result, reward, scores: room.state.scores, newBalance: user.coins });
   setTimeout(() => db.rooms.delete(room.id), 8000);
 }
 
-function applyReward(user, reward, isWin) {
-  user.coins = Math.max(0, user.coins + reward);
-  if (isWin) user.wins++;
-  else if (reward < 0) user.losses++;
-}
-
-// ===== SERVIR ARQUIVOS ESTÁTICOS =====
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Rota catch-all para SPA (serve index.html para qualquer rota não-API)
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
